@@ -77,8 +77,8 @@ def normalize_title(value: Any) -> str:
     text = re.sub(r"\bback[\s_-]*end\b", " backend ", text)
     text = re.sub(r"\bfull[\s_-]*stack\b", " fullstack ", text)
     text = re.sub(r"\.net\b", " dotnet ", text)
-    text = re.sub(r"\bc\s*#\b", " csharp ", text)
-    text = re.sub(r"\bc\s*\+\s*\+\b", " cpp ", text)
+    text = re.sub(r"\bc\s*#", " csharp ", text)
+    text = re.sub(r"\bc\s*\+\s*\+", " cpp ", text)
 
     text = re.sub(r"[^a-z0-9]+", " ", text)
     words = [word for word in text.split() if word not in STOP_WORDS and word not in LEVEL_WORDS]

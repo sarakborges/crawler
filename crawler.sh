@@ -684,10 +684,40 @@ def save_record(next_id: int, record: dict[str, Any]) -> int:
 
 def next_id_from_disk() -> int:
     highest = 0
+
+    # jobs.json é o histórico consolidado e continua existindo após dedup.sh.
+    aggregate_path = ROOT / "jobs.json"
+    if aggregate_path.exists():
+        try:
+            aggregate = json.loads(aggregate_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"Não foi possível ler jobs.json para gerar IDs: {error}") from error
+        if isinstance(aggregate, dict) and isinstance(aggregate.get("jobs"), list):
+            aggregate = aggregate["jobs"]
+        if not isinstance(aggregate, list):
+            raise RuntimeError("jobs.json precisa conter uma lista de vagas.")
+        for item in aggregate:
+            if not isinstance(item, dict):
+                continue
+            ids = [item.get("id")]
+            info = item.get("additional_info") or {}
+            if isinstance(info, dict):
+                ids.extend(info.get("merged_ids", []))
+            for value in ids:
+                try:
+                    highest = max(highest, int(value))
+                except (TypeError, ValueError):
+                    continue
+
+    # Também considera arquivos ainda não consolidados.
     for path in JOBS_DIR.glob("*.json"):
         try:
             item = json.loads(path.read_text(encoding="utf-8"))
             highest = max(highest, int(item.get("id", path.stem)))
+            info = item.get("additional_info") or {}
+            if isinstance(info, dict):
+                for value in info.get("merged_ids", []):
+                    highest = max(highest, int(value))
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             try:
                 highest = max(highest, int(path.stem))

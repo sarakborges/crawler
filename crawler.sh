@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # Crawler de vagas - Windows via Git Bash ou WSL; Linux/macOS via Bash.
 # Requisitos: Bash, Python 3.10+ (biblioteca padrão) e acesso à Internet.
 
-ROOT_DIR="$(cd -- "$(dirname -- "\${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$ROOT_DIR/jobs"
 
 if command -v python3 >/dev/null 2>&1; then
@@ -18,7 +18,7 @@ else
   exit 127
 fi
 
-exec "\${PYTHON[@]}" - "$ROOT_DIR" <<'PY'
+exec "${PYTHON[@]}" - "$ROOT_DIR" <<'PY'
 from __future__ import annotations
 
 import html

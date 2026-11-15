@@ -114,7 +114,7 @@ def semantic_key(record: dict[str, Any]) -> tuple[str, str, str] | None:
     title = normalize(record.get("title"))
     company = normalize(record.get("company"))
     place = location_key(record)
-    if not title or not company or not place:
+    if not title or not company or not place.strip("|"):
         return None
     return title, company, place
 

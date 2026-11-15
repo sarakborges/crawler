@@ -335,187 +335,299 @@ class Fetcher:
         raise RuntimeError(f"tentativas esgotadas: {last_error}")
 
 
-def find_job_postings(value: Any) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    def walk(item: Any) -> None:
-        if isinstance(item, dict):
-            types = item.get("@type", [])
-            types = types if isinstance(types, list) else [types]
-            if any(str(value).casefold().endswith("jobposting") for value in types):
-                result.append(item)
-            for child in item.values():
-                walk(child)
-        elif isinstance(item, list):
-            for child in item:
-                walk(child)
-    walk(value)
-    return result
+JOB_LINK = re.compile(r"^/(?:vaga-de-emprego(?:-[^/]+)?|vagas-de-emprego-[^/]+/[^/]+|vagas/v\d+|rc/clk)(?:/|$)", re.I)
+DATE_TEXT = re.compile(
+    r"\b(?:\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2}|hoje|ontem|today|yesterday|"
+    r"há\s+\d+\s+(?:minutos?|horas?|dias?|semanas?|meses?)|"
+    r"\d+\s+(?:minutes?|hours?|days?|weeks?)\s+ago)\b",
+    re.I,
+)
 
 
-def jsonld_jobs(document: HTMLDocument) -> list[dict[str, Any]]:
-    result = []
-    for raw in document.jsonld:
-        try:
-            result.extend(find_job_postings(json.loads(raw)))
-        except (json.JSONDecodeError, TypeError):
+class ListingStructureError(RuntimeError):
+    pass
+
+
+def has_class(node: Node, class_name: str) -> bool:
+    return class_name in node.attrs.get("class", "").split()
+
+
+def find_nodes(
+    root: Node,
+    tag: str | None = None,
+    class_name: str | None = None,
+    node_id: str | None = None,
+    attr_name: str | None = None,
+    attr_value: str | None = None,
+) -> list[Node]:
+    found: list[Node] = []
+    for node in root.descendants():
+        if tag and node.tag != tag:
             continue
-    return result
-
-
-def first(value: Any) -> Any:
-    return value[0] if isinstance(value, list) and value else value
-
-
-def address_from(job: dict[str, Any]) -> dict[str, Any]:
-    location = first(job.get("jobLocation")) or {}
-    address = location.get("address", {}) if isinstance(location, dict) else {}
-    address = first(address) or {}
-    if not isinstance(address, dict):
-        address = {}
-    return {
-        "street": clean(address.get("streetAddress")),
-        "number": None,
-        "neighborhood": clean(address.get("addressRegion2") or address.get("addressNeighborhood")),
-        "city": clean(address.get("addressLocality")),
-        "state": clean(address.get("addressRegion")),
-        "postal_code": clean(address.get("postalCode")),
-        "country": clean(address.get("addressCountry")),
-    }
-
-
-def salary_from(job: dict[str, Any]) -> dict[str, Any]:
-    raw = job.get("baseSalary") or job.get("salary")
-    if not raw:
-        return {"minimum": None, "maximum": None, "currency": None, "period": None, "raw": None}
-    if isinstance(raw, str):
-        return {"minimum": None, "maximum": None, "currency": None, "period": None, "raw": clean(raw)}
-    if not isinstance(raw, dict):
-        return {"minimum": None, "maximum": None, "currency": None, "period": None, "raw": clean(raw)}
-    value = raw.get("value", raw)
-    if not isinstance(value, dict):
-        value = {"value": value}
-    def number(item: Any) -> float | None:
-        try:
-            return float(str(item).replace(",", ".")) if item is not None else None
-        except (TypeError, ValueError):
-            return None
-    minimum = number(value.get("minValue", value.get("value")))
-    maximum = number(value.get("maxValue", value.get("value")))
-    currency = clean(raw.get("currency") or value.get("currency"))
-    period = clean(value.get("unitText") or raw.get("unitText"))
-    raw_text = raw.get("description") or f"{minimum or ''}-{maximum or ''} {currency or ''} {period or ''}"
-    return {"minimum": minimum, "maximum": maximum, "currency": currency, "period": period, "raw": clean(raw_text)}
-
-
-def to_record(job: dict[str, Any], platform: str, page_url: str, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
-    fallback = fallback or {}
-    organization = job.get("hiringOrganization") or {}
-    company = organization.get("name") if isinstance(organization, dict) else organization
-    published, precision = parse_date(job.get("datePosted") or fallback.get("published_at"))
-    location = address_from(job)
-    location_type = clean(job.get("jobLocationType") or job.get("workplaceType") or fallback.get("work_model")) or ""
-    description = strip_html(job.get("description") or fallback.get("description"))
-    job_text = " ".join(str(job.get(key) or "") for key in ("title", "description", "jobLocationType", "workplaceType"))
-    is_remote = bool(re.search(r"telecommute|remote|remot|home.?office", location_type + " " + job_text, re.I))
-    if is_remote:
-        location.update({
-            "city": location.get("city") or "Porto Alegre",
-            "state": location.get("state") or "RS",
-            "country": location.get("country") or "BR",
-        })
-    employment = job.get("employmentType") or fallback.get("employment_type")
-    if isinstance(employment, list):
-        employment = ", ".join(str(item) for item in employment)
-    identifier = job.get("identifier")
-    if isinstance(identifier, dict):
-        identifier = identifier.get("value")
-    info = {
-        "external_id": clean(identifier or fallback.get("external_id")),
-        "first_seen_at": NOW.isoformat(),
-        "employment_type": clean(employment),
-        "work_model": "remote" if is_remote else location_type or fallback.get("work_model"),
-        "date_precision": precision,
-    }
-    for key in ("validThrough", "experienceRequirements", "qualifications", "responsibilities", "skills", "industry", "jobLocationType", "applicantLocationRequirements", "directApply"):
-        if job.get(key) is not None:
-            info[key] = job[key]
-    return {
-        "id": None,
-        "title": clean(job.get("title") or fallback.get("title")),
-        "description": description,
-        "company": clean(company or fallback.get("company")),
-        "platform": platform,
-        "url": clean(job.get("url") or fallback.get("url") or page_url),
-        "published_at": published.isoformat() if published else None,
-        "salary": salary_from(job),
-        "schedule": clean(job.get("workHours") or job.get("schedule") or fallback.get("schedule")),
-        "address": location,
-        "additional_info": info,
-    }
-
-
-JOB_LINK = re.compile(r"/(?:vaga|vagas|job|jobs|oportunidade|oportunidades|emprego|empregos|position|positions|offer|oferta|viewjob)(?:/|[-_?]|$)|/rc/clk(?:/|$)", re.I)
-DATE_TEXT = re.compile(r"\b(?:\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2}|hoje|ontem|h[aá]\s+\d+\s+(?:minutos?|horas?|dias?|semanas?))\b", re.I)
-SALARY_TEXT = re.compile(r"(?:R\$\s?[\d.]+(?:,\d{2})?(?:\s*(?:a|-)\s*R?\$?\s?[\d.]+(?:,\d{2})?)?|\$\s?[\d,.]+)", re.I)
-
-
-def candidates_from(page: Page) -> list[dict[str, Any]]:
-    host = urllib.parse.urlsplit(page.url).netloc.lower()
-    found: dict[str, dict[str, Any]] = {}
-    for node in page.document.root.descendants():
-        if node.tag != "a":
+        if class_name and not has_class(node, class_name):
             continue
-        href = node.attrs.get("href", "").strip()
-        title = node.text() or clean(node.attrs.get("aria-label") or node.attrs.get("title")) or ""
-        if not href or len(title) < 3 or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+        if node_id and node.attrs.get("id") != node_id:
             continue
+        if attr_name and node.attrs.get(attr_name) != attr_value:
+            continue
+        found.append(node)
+    return found
+
+
+def find_first(
+    root: Node,
+    tag: str | None = None,
+    class_name: str | None = None,
+    node_id: str | None = None,
+    attr_name: str | None = None,
+    attr_value: str | None = None,
+) -> Node | None:
+    matches = find_nodes(root, tag, class_name, node_id, attr_name, attr_value)
+    return matches[0] if matches else None
+
+
+def has_any_class_text(card: Node, class_name: str) -> str | None:
+    node = find_first(card, class_name=class_name)
+    return clean(node.text()) if node else None
+
+
+def listing_container(page: Page, platform: str) -> Node:
+    selectors = {
+        "gupy": ("job-listing-results", None),
+        "bne": (None, "lista_vagas__grid"),
+        "trabalhabrasil": (None, "jobs-list"),
+        "vagas.com": ("todasVagas", None),
+        "indeed": ("mosaic-jobResults", None),
+    }
+    if platform not in selectors:
+        raise ListingStructureError(f"Plataforma sem seletor configurado: {platform}")
+    node_id, class_name = selectors[platform]
+    container = find_first(page.document.root, node_id=node_id, class_name=class_name)
+    if container is None:
+        raise ListingStructureError(
+            f"Contêiner de resultados não encontrado para {platform}; "
+            "a estrutura da página pode ter mudado."
+        )
+    return container
+
+
+def job_link_for_card(card: Node, platform: str) -> Node | None:
+    for anchor in find_nodes(card, tag="a"):
+        href = html.unescape(anchor.attrs.get("href", "")).strip()
+        if not href:
+            continue
+        parsed = urllib.parse.urlsplit(urllib.parse.urljoin("https://invalid.local", href))
+        path = parsed.path
+        if platform == "gupy":
+            host = urllib.parse.urlsplit(href).netloc.casefold()
+            if host.endswith(".gupy.io") and re.search(r"/job/[^/]+$", path, re.I):
+                if find_first(card, class_name="MuiCard-job_default") is not None:
+                    return anchor
+        elif platform == "bne":
+            if has_class(anchor, "card__link") and re.search(r"/vaga-de-emprego(?:-[^/]+)?/.+/\d+/?$", path, re.I):
+                return anchor
+        elif platform == "trabalhabrasil":
+            if has_class(anchor, "job-link") and re.search(r"/vagas-de-emprego-[^/]+/.+/\d+/?$", path, re.I):
+                return anchor
+        elif platform == "vagas.com":
+            if has_class(anchor, "link-detalhes-vaga") and re.search(r"/vagas/v\d+/", path, re.I):
+                if anchor.attrs.get("data-id-vaga", "").isdigit():
+                    return anchor
+        elif platform == "indeed":
+            query = dict(urllib.parse.parse_qsl(parsed.query))
+            if has_class(anchor, "jcs-JobTitle") and query.get("jk"):
+                return anchor
+    return None
+
+
+def text_by_selector(
+    card: Node,
+    tag: str | None = None,
+    class_name: str | None = None,
+    attr_name: str | None = None,
+    attr_value: str | None = None,
+) -> str | None:
+    node = find_first(card, tag=tag, class_name=class_name, attr_name=attr_name, attr_value=attr_value)
+    if node is None:
+        return None
+    return clean(node.text())
+
+
+def card_candidates(page: Page, platform: str) -> tuple[list[dict[str, Any]], int]:
+    container = listing_container(page, platform)
+
+    if platform == "gupy":
+        cards = [
+            node for node in find_nodes(container, tag="li")
+            if find_first(node, class_name="MuiCard-job_default") is not None
+        ]
+    elif platform == "bne":
+        cards = find_nodes(container, tag="section", class_name="job__card__container")
+    elif platform == "trabalhabrasil":
+        cards = find_nodes(container, tag="article", class_name="job-card")
+    elif platform == "vagas.com":
+        cards = find_nodes(container, tag="li", class_name="vaga")
+    else:
+        cards = [
+            node for node in find_nodes(container, class_name="cardOutline")
+            if has_class(node, "result")
+        ]
+
+    candidates: list[dict[str, Any]] = []
+    rejected_cards = 0
+    remote_scope = bool(re.search(r"remote|remoto|home.?office", urllib.parse.unquote(page.url), re.I))
+
+    for card in cards:
+        anchor = job_link_for_card(card, platform)
+        if anchor is None:
+            rejected_cards += 1
+            continue
+
+        href = html.unescape(anchor.attrs.get("href", "")).strip()
         url = urllib.parse.urljoin(page.url, href)
         parsed = urllib.parse.urlsplit(url)
-        path = parsed.path.lower()
-        if parsed.netloc.lower() != host or not JOB_LINK.search(path):
+        if parsed.scheme not in {"http", "https"}:
+            rejected_cards += 1
             continue
-        if path in {"/jobs", "/jobs/", "/job", "/job/", "/vagas", "/vagas/"} or any(x in path for x in ("job-search", "vagas-de-emprego-em-", "vagas-em-porto-alegre", "vagas-de-emprego-home-office", "/jobs/home")):
+
+        title = (
+            text_by_selector(card, tag="h3", class_name="job-title")
+            or text_by_selector(card, tag="h2", class_name="cargo")
+            or clean(anchor.attrs.get("title"))
+            or clean(anchor.text())
+        )
+        if platform == "indeed":
+            title = (
+                text_by_selector(card, tag="span", attr_name="id", attr_value=f"jobTitle-{dict(urllib.parse.parse_qsl(parsed.query)).get('jk', '')}")
+                or clean(anchor.attrs.get("aria-label"))
+                or clean(anchor.text())
+            )
+            title = re.sub(r"^informações completas da vaga de\s+", "", title or "", flags=re.I)
+        if platform == "bne":
+            title_attr = clean(anchor.attrs.get("title"))
+            if title_attr:
+                title = re.sub(r"\s+em\s+Porto Alegre\s*/\s*RS$", "", title_attr, flags=re.I)
+
+        if not title or len(title) < 3:
+            rejected_cards += 1
             continue
-        parent = node
-        for _ in range(5):
-            if parent.parent is None:
-                break
-            parent = parent.parent
-            if parent.tag in {"article", "li"} or any(x in parent.attrs.get("class", "").lower() for x in ("job", "vaga", "card", "result", "item")):
-                break
-        card = parent.text()[:5000]
+
+        company = None
+        location = None
+        published_raw = None
+        external_id = None
+
+        if platform == "gupy":
+            company = text_by_selector(card, tag="p", class_name="MuiTypography-body-medium")
+            location = text_by_selector(card, attr_name="data-testid", attr_value="job-location")
+            external_id = re.search(r'"jobId"\s*:\s*(\d+)', urllib.parse.unquote(parsed.path))
+            external_id = external_id.group(1) if external_id else None
+        elif platform == "bne":
+            external_id = re.search(r"/(\d+)/?$", parsed.path)
+            external_id = external_id.group(1) if external_id else None
+            info_items = [node.text() for node in find_nodes(card, class_name="info__vaga-item")]
+            location = next((item for item in info_items if re.search(r"porto\s+alegre|remoto|h[ií]brido", item, re.I)), None)
+        elif platform == "trabalhabrasil":
+            company = text_by_selector(card, tag="p", class_name="job-company")
+            location = text_by_selector(card, tag="address", class_name="job-location")
+            external_id = clean(card.attrs.get("data-job-id"))
+        elif platform == "vagas.com":
+            company = text_by_selector(card, tag="span", class_name="emprVaga")
+            location = text_by_selector(card, class_name="vaga-local")
+            external_id = clean(anchor.attrs.get("data-id-vaga"))
+        elif platform == "indeed":
+            company = text_by_selector(card, attr_name="data-testid", attr_value="company-name")
+            location = text_by_selector(card, attr_name="data-testid", attr_value="text-location")
+            external_id = dict(urllib.parse.parse_qsl(parsed.query)).get("jk")
+
+        time_node = find_first(card, tag="time")
+        if time_node:
+            published_raw = time_node.attrs.get("datetime") or clean(time_node.text())
+        if not published_raw:
+            published_node = (
+                find_first(card, class_name="data-publicacao")
+                or find_first(card, class_name="eco-7ia25i")
+                or find_first(card, attr_name="data-testid", attr_value="job-age")
+            )
+            if published_node:
+                published_raw = clean(published_node.text())
+        card_text = card.text()[:6000]
+        if not published_raw:
+            match = DATE_TEXT.search(card_text)
+            published_raw = match.group(0) if match else None
+
+        work_model = None
+        card_lower = card_text.casefold()
+        if re.search(r"remoto|home\s*office|remote|telecommute", card_lower):
+            work_model = "remote"
+        elif re.search(r"h[ií]brido|hybrid", card_lower):
+            work_model = "hybrid"
+        elif location and re.search(r"porto\s+alegre", location, re.I):
+            work_model = "on_site"
+        elif remote_scope:
+            work_model = "remote"
+
         candidate = {
             "url": url,
             "title": title,
-            "card_text": card,
-            "description": card or None,
-            "company": None,
-            "published_at": None,
-            "salary_raw": None,
-            "schedule": None,
-            "work_model": None,
+            "company": company,
+            "location": location,
+            "published_at": published_raw,
+            "external_id": external_id,
+            "work_model": work_model,
+            "card_text": card_text,
         }
-        match = DATE_TEXT.search(card)
-        if match:
-            candidate["published_at"] = match.group(0)
-        match = SALARY_TEXT.search(card)
-        if match:
-            candidate["salary_raw"] = match.group(0)
-        if re.search(r"remoto|home\s*office|remote", card, re.I):
-            candidate["work_model"] = "remote"
-        elif re.search(r"h[ií]brido|hybrid", card, re.I):
-            candidate["work_model"] = "hybrid"
-        elif re.search(r"porto\s+alegre", card, re.I):
-            candidate["work_model"] = "on_site"
-        match = re.search(r"(?:escala|jornada|hor[aá]rio)\s*:?\s*([^.;\n]{3,100})", card, re.I)
-        if match:
-            candidate["schedule"] = clean(match.group(0))
-        match = re.search(r"(?:[?&](?:id|jk|jobId|offerId)=|/)([A-Za-z0-9_-]{5,})(?:[/?&#]|$)", url, re.I)
-        if match:
-            candidate["external_id"] = match.group(1)
-        found[url] = candidate
-    return list(found.values())
+        candidates.append(candidate)
 
+    unique: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        unique.setdefault(candidate["url"], candidate)
+    return list(unique.values()), rejected_cards
+
+
+def make_listing_record(candidate: dict[str, Any], platform: str) -> dict[str, Any]:
+    published, precision = parse_date(candidate.get("published_at"))
+    model = candidate.get("work_model")
+    location_text = str(candidate.get("location") or "")
+    if not model:
+        if re.search(r"remoto|home\s*office|remote", location_text, re.I):
+            model = "remote"
+        elif re.search(r"h[ií]brido|hybrid", location_text, re.I):
+            model = "hybrid"
+        elif re.search(r"porto\s+alegre", location_text, re.I):
+            model = "on_site"
+
+    city = "Porto Alegre" if model == "remote" or re.search(r"\bporto\s+alegre\b", location_text, re.I) else None
+    state = "RS" if city == "Porto Alegre" else None
+    return {
+        "id": None,
+        "title": clean(candidate.get("title")),
+        "description": None,
+        "company": clean(candidate.get("company")),
+        "platform": platform,
+        "url": candidate["url"],
+        "published_at": published.isoformat() if published else None,
+        "salary": {"minimum": None, "maximum": None, "currency": None, "period": None, "raw": None},
+        "schedule": None,
+        "address": {
+            "street": None,
+            "number": None,
+            "neighborhood": None,
+            "city": city,
+            "state": state,
+            "postal_code": None,
+            "country": "BR" if city or model == "remote" else None,
+        },
+        "additional_info": {
+            "external_id": clean(candidate.get("external_id")),
+            "first_seen_at": NOW.isoformat(),
+            "employment_type": None,
+            "work_model": model,
+            "date_precision": precision,
+            "listing_location": clean(location_text),
+            "enrichment_status": "pending",
+        },
+    }
 
 def has_explicit_no_results(page: Page) -> bool:
     page_text = page.document.root.text().casefold()
@@ -529,34 +641,31 @@ def has_explicit_no_results(page: Page) -> bool:
     return any(phrase in page_text for phrase in phrases)
 
 
-def next_pages(page: Page) -> list[str]:
-    host = urllib.parse.urlsplit(page.url).netloc.lower()
-    urls = []
-    for node in page.document.root.descendants():
-        if node.tag != "a" or not node.attrs.get("href"):
+def next_pages(page: Page, platform: str) -> list[str]:
+    container = listing_container(page, platform)
+    urls: list[str] = []
+    for node in find_nodes(container, tag="a"):
+        href = node.attrs.get("href", "").strip()
+        if not href:
             continue
-        rel = node.attrs.get("rel", "").lower()
-        cls = node.attrs.get("class", "").lower()
-        aria = node.attrs.get("aria-label", "").lower()
-        label = (node.text() or "").strip().lower()
-        parent = node.parent
-        classes = []
-        for _ in range(3):
-            if parent is None:
-                break
-            classes.append(parent.attrs.get("class", "").lower())
-            parent = parent.parent
-        is_next = (
-            "next" in rel or "next" in cls or "pagination" in cls
-            or any("pagination" in item or "pager" in item for item in classes)
-            or "próxima" in aria or "proxima" in aria
-            or any(word in label for word in ("próxima", "proxima", "next"))
-            or label in {">", "»", "›"}
+        rel = node.attrs.get("rel", "").casefold()
+        aria = node.attrs.get("aria-label", "").casefold()
+        testid = node.attrs.get("data-testid", "").casefold()
+        classes = node.attrs.get("class", "").casefold()
+        label = (node.text() or "").strip().casefold()
+        pagination_marker = (
+            "pagination" in classes or "pager" in classes
+            or "next" in rel or "next" in aria or "próxima" in aria or "proxima" in aria
+            or "pagination-page-next" in testid
+            or label in {">", "»", "›", "próxima", "proxima", "next"}
         )
-        if is_next:
-            url = urllib.parse.urljoin(page.url, node.attrs["href"])
-            if urllib.parse.urlsplit(url).netloc.lower() == host:
-                urls.append(url)
+        if not pagination_marker:
+            continue
+        url = urllib.parse.urljoin(page.url, href)
+        parsed = urllib.parse.urlsplit(url)
+        original = urllib.parse.urlsplit(page.url)
+        if parsed.scheme in {"http", "https"} and parsed.netloc.casefold() == original.netloc.casefold():
+            urls.append(url)
     return list(dict.fromkeys(urls))
 
 
@@ -616,61 +725,6 @@ def in_window(record: dict[str, Any], start: datetime, end: datetime) -> bool:
     if precision == "date":
         return start.date() <= published.date() <= end.date()
     return start <= published <= end
-
-
-def fallback_record(candidate: dict[str, Any], platform: str, detail: Page | None = None) -> dict[str, Any]:
-    title = candidate.get("title")
-    description = candidate.get("description")
-    published_raw = candidate.get("published_at")
-    schedule = candidate.get("schedule")
-    context = candidate.get("card_text", "")
-    address_text = context
-    if detail:
-        title = detail.document.meta.get("og:title") or next((node.text() for node in detail.document.root.descendants() if node.tag == "h1" and node.text()), None) or title
-        description = strip_html(detail.document.meta.get("description") or detail.document.meta.get("og:description")) or description
-        address_text += " " + detail.document.root.text()
-        if not published_raw:
-            match = DATE_TEXT.search(address_text)
-            published_raw = match.group(0) if match else None
-        if not schedule:
-            match = re.search(r"(?:escala|jornada|hor[aá]rio)\s*:?\s*([^.;\n]{3,100})", address_text, re.I)
-            schedule = clean(match.group(0)) if match else None
-    model = candidate.get("work_model")
-    if not model:
-        if re.search(r"remoto|home\s*office|remote", address_text, re.I):
-            model = "remote"
-        elif re.search(r"h[ií]brido|hybrid", address_text, re.I):
-            model = "hybrid"
-        elif re.search(r"porto\s+alegre", address_text, re.I):
-            model = "on_site"
-    published, precision = parse_date(published_raw)
-    poa_or_remote = "porto alegre" in address_text.casefold() or model == "remote"
-    return {
-        "id": None,
-        "title": clean(title),
-        "description": clean(description),
-        "company": clean(candidate.get("company")),
-        "platform": platform,
-        "url": detail.url if detail else candidate.get("url"),
-        "published_at": published.isoformat() if published else None,
-        "salary": {"minimum": None, "maximum": None, "currency": "BRL" if candidate.get("salary_raw") else None, "period": None, "raw": candidate.get("salary_raw")},
-        "schedule": clean(schedule),
-        "address": {
-            "street": None, "number": None, "neighborhood": None,
-            "city": "Porto Alegre" if poa_or_remote else None,
-            "state": "RS" if poa_or_remote else None,
-            "postal_code": None,
-            "country": "BR" if poa_or_remote else None,
-        },
-        "additional_info": {
-            "external_id": candidate.get("external_id"),
-            "first_seen_at": NOW.isoformat(),
-            "employment_type": candidate.get("employment_type"),
-            "work_model": model,
-            "date_precision": precision,
-            "source_card_text": context[:3000],
-        },
-    }
 
 
 def save_record(next_id: int, record: dict[str, Any]) -> int:
@@ -744,105 +798,70 @@ def crawl(source: Source, fetcher: Fetcher, start: datetime, end: datetime, next
     visited: set[str] = set()
     saw_listings = False
     failed = False
+
     while queue:
         url = queue.pop(0)
         if url in visited:
             continue
         visited.add(url)
         try:
-            log(f"  Página {result['pages'] + 1}: {url}")
+            log(f"  [PÁGINA {result['pages'] + 1}] Consultando {url}")
             page = fetcher.get(url)
             result["pages"] += 1
-            log("  [EXTRAÇÃO] Analisando JSON-LD e links da página.")
-            structured = jsonld_jobs(page.document)
-            candidates = candidates_from(page)
-            log(f"  [EXTRAÇÃO] {len(structured)} vagas estruturadas e {len(candidates)} links candidatos.")
+            log(f"  [SELETOR] Localizando contêiner de resultados de {source.name}.")
+            candidates, rejected_cards = card_candidates(page, source.name)
+            log(f"  [CARDS] {len(candidates)} vagas válidas; {rejected_cards} cards descartados por não conterem link de vaga reconhecido.")
             if has_explicit_no_results(page):
                 log("  [RESULTADO] A página informa que não há vagas para esta consulta.")
-            if structured or candidates or has_explicit_no_results(page):
                 saw_listings = True
-            known_urls = set()
-            for job_index, job in enumerate(structured, start=1):
-                log(f"  [VAGA {job_index}/{len(structured)}] Extraindo {job.get('title') or '(sem título)'}")
-                record = to_record(job, source.name, page.url)
-                if record.get("url"):
-                    known_urls.add(urllib.parse.urldefrag(record["url"])[0])
-                context = " ".join(str(record.get(key) or "") for key in ("title", "description"))
+            if candidates:
+                saw_listings = True
+
+            for index, candidate in enumerate(candidates, start=1):
+                log(f"  [VAGA {index}/{len(candidates)}] {candidate['title']}")
+                record = make_listing_record(candidate, source.name)
+                context = candidate.get("card_text", "")
                 allowed, model = location_allowed(record, context)
-                if allowed and in_window(record, start, end):
-                    record.setdefault("additional_info", {})["work_model"] = model or record["additional_info"].get("work_model")
-                    next_id = save_record(next_id, record)
-                    result["saved"] += 1
-                elif not allowed:
-                    log(f"  [FILTRO] Vaga ignorada por localidade/modalidade: {record.get('title') or '(sem título)'}")
-                else:
-                    log(f"  [FILTRO] Vaga fora do intervalo de publicação: {record.get('title') or '(sem título)'}")
-            for candidate_index, candidate in enumerate(candidates, start=1):
-                if urllib.parse.urldefrag(candidate["url"])[0] in known_urls or candidate["url"] in visited:
-                    log(f"  [DETALHE] Link já coberto ou visitado; ignorando {candidate['url']}")
+                if not allowed:
+                    log(f"    [FILTRO] Fora da localidade/modalidade: {candidate['location'] or 'local não identificado'}")
                     continue
-                try:
-                    log(f"  [DETALHE {candidate_index}/{len(candidates)}] Consultando {candidate['url']}")
-                    detail = fetcher.get(candidate["url"])
-                    visited.add(candidate["url"])
-                    jobs = jsonld_jobs(detail.document)
-                    if jobs:
-                        record = to_record(jobs[0], source.name, detail.url, candidate)
-                    else:
-                        record = fallback_record(candidate, source.name, detail)
-                    context = candidate.get("card_text", "") + " " + detail.document.root.text()[:5000]
-                    allowed, model = location_allowed(record, context)
-                    if allowed and in_window(record, start, end):
-                        record.setdefault("additional_info", {})["work_model"] = model or record.get("additional_info", {}).get("work_model")
-                        next_id = save_record(next_id, record)
-                        result["saved"] += 1
-                except RobotsDisallowed as error:
-                    result["notes"].append(f"Detalhe ignorado por robots.txt: {candidate['url']} ({error})")
-                    record = fallback_record(candidate, source.name)
-                    allowed, model = location_allowed(record, candidate.get("card_text", ""))
-                    if allowed and in_window(record, start, end):
-                        record.setdefault("additional_info", {})["work_model"] = model
-                        next_id = save_record(next_id, record)
-                        result["saved"] += 1
-                except RobotsUnavailable as error:
-                    failed = True
-                    result["errors"].append(f"robots.txt indisponível em {candidate['url']}: {error}")
-                except urllib.error.HTTPError as error:
-                    if error.code in (404, 410):
-                        record = fallback_record(candidate, source.name)
-                        allowed, model = location_allowed(record, candidate.get("card_text", ""))
-                        if allowed and in_window(record, start, end):
-                            record.setdefault("additional_info", {})["work_model"] = model
-                            next_id = save_record(next_id, record)
-                            result["saved"] += 1
-                        result["notes"].append(f"Detalhe HTTP {error.code}: {candidate['url']}")
-                    else:
-                        failed = True
-                        result["errors"].append(f"Detalhe {candidate['url']}: {error}")
-                except Exception as error:
-                    failed = True
-                    result["errors"].append(f"Detalhe {candidate['url']}: {error}")
-            discovered_pages = next_pages(page)
-            queued_pages = 0
-            for next_url in discovered_pages:
-                if next_url not in visited:
+                if not in_window(record, start, end):
+                    log("    [FILTRO] Sem data verificável ou fora do intervalo solicitado.")
+                    continue
+                record.setdefault("additional_info", {})["work_model"] = model or record["additional_info"].get("work_model")
+                next_id = save_record(next_id, record)
+                result["saved"] += 1
+
+            discovered = next_pages(page, source.name)
+            added = 0
+            for next_url in discovered:
+                if next_url not in visited and next_url not in queue:
                     queue.append(next_url)
-                    queued_pages += 1
-            log(f"  [PAGINAÇÃO] {queued_pages} próxima(s) página(s) adicionada(s) à fila.")
+                    added += 1
+            log(f"  [PAGINAÇÃO] {added} próxima(s) página(s) adicionada(s) à fila.")
+
         except RobotsDisallowed as error:
             result["status"] = "SKIPPED_ROBOTS"
-            result["notes"].append(f"Pesquisa não permitida: {url} ({error})")
+            result["notes"].append(f"Pesquisa não permitida por robots.txt: {url} ({error})")
+            log(f"  [ROBOTS] Coleta não permitida em {url}; ignorando esta plataforma/página.")
         except RobotsUnavailable as error:
             failed = True
             result["errors"].append(f"robots.txt indisponível em {url}: {error}")
+            log(f"  [ERRO] Não foi possível verificar robots.txt em {url}: {error}")
+        except ListingStructureError as error:
+            failed = True
+            result["errors"].append(f"Estrutura de resultados não reconhecida em {url}: {error}")
+            log(f"  [ERRO DE ESTRUTURA] {error}")
         except Exception as error:
             failed = True
             result["errors"].append(f"Página {url}: {error}")
+            log(f"  [ERRO] Falha ao consultar {url}: {error}")
+
     if failed:
         result["status"] = "INCOMPLETE"
     elif not saw_listings and not (result["status"] == "SKIPPED_ROBOTS" and result["pages"] == 0):
         result["status"] = "INCOMPLETE"
-        result["notes"].append("Nenhuma vaga reconhecida; a página pode depender de JavaScript ou ter mudado de estrutura.")
+        result["notes"].append("Nenhum card de vaga reconhecido; a página pode ter mudado de estrutura.")
     return next_id, result
 
 

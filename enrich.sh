@@ -713,6 +713,47 @@ def apply_detail(record: dict[str, Any], detail: dict[str, Any]) -> None:
                 info[key] = value
 
 
+def finalize_pending_publication_date(record: dict[str, Any]) -> bool:
+    info = record.get("additional_info")
+    if not isinstance(info, dict) or not info.get("publication_date_pending"):
+        return True
+
+    window = info.get("collection_window")
+    if not isinstance(window, dict):
+        log(f"  [DATA] ID {record.get('id')}: janela de coleta ausente; não é possível validar.")
+        return False
+
+    start, _ = parse_date(window.get("start"))
+    end, _ = parse_date(window.get("end"))
+    first_seen, _ = parse_date(info.get("first_seen_at"))
+
+    # Records that predate this collection window already belong to the archive.
+    # A newly discovered duplicate must not cause an older record to be deleted.
+    if start and first_seen and first_seen < start:
+        info.pop("publication_date_pending", None)
+        info.pop("collection_window", None)
+        return True
+
+    published, precision = parse_date(record.get("published_at"))
+    if published is None or start is None or end is None:
+        log(f"  [DATA] ID {record.get('id')}: data de publicação não pôde ser confirmada.")
+        return False
+
+    if precision == "date":
+        in_range = start.date() <= published.date() <= end.date()
+    else:
+        in_range = start <= published <= end
+
+    if not in_range:
+        log(f"  [DATA] ID {record.get('id')}: publicada fora da janela de coleta.")
+        return False
+
+    info.pop("publication_date_pending", None)
+    info.pop("collection_window", None)
+    info["publication_date_verified"] = True
+    return True
+
+
 def load_database() -> list[dict[str, Any]]:
     if not DATABASE.is_file():
         raise RuntimeError("jobs.json não existe. Execute dedup.sh antes de enrich.sh.")
@@ -870,6 +911,20 @@ def main() -> int:
     log(f"  Páginas enriquecidas: {succeeded}")
     log(f"  Links ignorados por política/ausência: {skipped}")
     log(f"  Falhas: {failed}")
+
+    log("\n[VALIDAÇÃO DO INTERVALO DE PUBLICAÇÃO]")
+    retained: list[dict[str, Any]] = []
+    removed_outside_window = 0
+    for record in records:
+        if finalize_pending_publication_date(record):
+            retained.append(record)
+        else:
+            removed_outside_window += 1
+            log(f"  [DESCARTE] ID {record.get('id')}: anúncio novo sem data confirmada ou fora do intervalo.")
+    records[:] = retained
+    write_database(records)
+    log(f"  Anúncios descartados por data: {removed_outside_window}")
+    log(f"  Total preservado em jobs.json: {len(records)}")
     log("  Arquivo atualizado: jobs.json")
 
     if failed:

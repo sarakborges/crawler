@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd -- "$(dirname -- "\${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 PYTHON=()
 
@@ -21,7 +21,7 @@ else
   exit 127
 fi
 
-exec "\${PYTHON[@]}" - "$ROOT_DIR" <<'PY'
+exec "${PYTHON[@]}" - "$ROOT_DIR" <<'PY'
 from __future__ import annotations
 
 import copy
@@ -800,6 +800,10 @@ def main() -> int:
                 detail = extract_detail(final_url, document)
                 before_description = clean(record.get("description"))
                 apply_detail(record, detail)
+                # Persist after each successful page so an interruption does not
+                # discard fields already extracted from this source.
+                write_database(records)
+                log(f"    [PERSISTÊNCIA] Dados desta página gravados em jobs.json.")
                 per_url_results.append({
                     "url": url,
                     "status": "completed",

@@ -507,6 +507,18 @@ def candidates_from(page: Page) -> list[dict[str, Any]]:
     return list(found.values())
 
 
+def has_explicit_no_results(page: Page) -> bool:
+    page_text = page.document.root.text().casefold()
+    phrases = (
+        "nenhuma vaga encontrada", "nenhuma vaga foi encontrada",
+        "não encontramos vagas", "nao encontramos vagas",
+        "nenhum resultado encontrado", "não há vagas disponíveis",
+        "nao ha vagas disponiveis", "no jobs found", "no results found",
+        "we couldn't find any jobs", "we could not find any jobs",
+    )
+    return any(phrase in page_text for phrase in phrases)
+
+
 def next_pages(page: Page) -> list[str]:
     host = urllib.parse.urlsplit(page.url).netloc.lower()
     urls = []
@@ -701,7 +713,7 @@ def crawl(source: Source, fetcher: Fetcher, start: datetime, end: datetime, next
             result["pages"] += 1
             structured = jsonld_jobs(page.document)
             candidates = candidates_from(page)
-            if structured or candidates:
+            if structured or candidates or has_explicit_no_results(page):
                 saw_listings = True
             known_urls = set()
             for job in structured:

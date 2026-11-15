@@ -4,14 +4,22 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$ROOT_DIR/jobs"
 
-if command -v python3 >/dev/null 2>&1; then
-  PYTHON=(python3)
-elif command -v python >/dev/null 2>&1; then
-  PYTHON=(python)
-elif command -v py >/dev/null 2>&1; then
+PYTHON=()
+
+python_works() {
+  "$@" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1
+}
+
+# Evita interpretar o alias da Microsoft Store como uma instalação funcional.
+if command -v py >/dev/null 2>&1 && python_works py -3; then
   PYTHON=(py -3)
+elif command -v python >/dev/null 2>&1 && python_works python; then
+  PYTHON=(python)
+elif command -v python3 >/dev/null 2>&1 && python_works python3; then
+  PYTHON=(python3)
 else
-  echo "ERRO: Python 3 não encontrado. Instale Python 3.10+ e adicione-o ao PATH." >&2
+  echo "ERRO: não encontrei um interpretador Python 3.10+ funcional." >&2
+  echo "Verifique no Git Bash: py -3 --version; python --version; python3 --version" >&2
   exit 127
 fi
 
@@ -88,7 +96,9 @@ def read_pending_files() -> tuple[list[dict[str, Any]], list[Path]]:
         (path for path in JOBS_DIR.glob("*.json") if path.is_file()),
         key=lambda path: (not path.stem.isdigit(), int(path.stem) if path.stem.isdigit() else path.stem),
     )
-    for path in files:
+    print(f"[LEITURA] {len(files)} arquivos individuais encontrados em jobs/", flush=True)
+    for index, path in enumerate(files, start=1):
+        print(f"[LEITURA {index}/{len(files)}] {path.name}", flush=True)
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
@@ -257,9 +267,16 @@ def write_database(records: list[dict[str, Any]]) -> None:
 
 
 def main() -> int:
+    print("[INÍCIO] Deduplicação iniciada.", flush=True)
+    print("[ETAPA 1/4] Lendo a base permanente jobs.json.", flush=True)
     existing = read_database()
+    print(f"[OK] {len(existing)} vagas já existentes.", flush=True)
+
+    print("[ETAPA 2/4] Lendo os arquivos individuais de jobs/.", flush=True)
     pending, pending_files = read_pending_files()
+    print(f"[OK] {len(pending)} novas entradas carregadas.", flush=True)
     combined = existing + pending
+    print(f"[ETAPA 3/4] Comparando {len(combined)} entradas para consolidar duplicatas.", flush=True)
 
     result: list[dict[str, Any]] = []
     url_index: dict[str, int] = {}
@@ -267,7 +284,9 @@ def main() -> int:
     semantic_index: dict[tuple[str, str, str], list[int]] = {}
     duplicates = 0
 
-    for record in combined:
+    for position, record in enumerate(combined, start=1):
+        title_for_log = str(record.get("title") or "(sem título)")
+        print(f"[COMPARAÇÃO {position}/{len(combined)}] {title_for_log}", flush=True)
         candidates: set[int] = set()
         for url in indexed_urls(record):
             if url in url_index:
@@ -284,6 +303,7 @@ def main() -> int:
         matches = [index for index in sorted(candidates) if are_duplicates(result[index], record)]
         if matches:
             keeper = matches[0]
+            print(f"  [DUPLICATA] Consolidando com a vaga ID {result[keeper].get('id')}.", flush=True)
             result[keeper] = merge_records(result[keeper], record)
             duplicates += 1
             for extra in reversed(matches[1:]):
@@ -307,6 +327,7 @@ def main() -> int:
                     semantic_index.setdefault(item_semantic, []).append(index)
             continue
 
+        print("  [NOVA] Mantendo como vaga independente.", flush=True)
         result.append(copy.deepcopy(record))
         index = len(result) - 1
         for item_url in indexed_urls(record):
@@ -322,7 +343,9 @@ def main() -> int:
     ))
 
     # jobs.json é o histórico permanente. Primeiro grava e valida; só depois limpa jobs/*.json.
+    print(f"[ETAPA 4/4] Gravando e validando {len(result)} vagas em jobs.json.", flush=True)
     write_database(result)
+    print("[OK] jobs.json gravado e validado.", flush=True)
 
     deleted = 0
     failures: list[str] = []
@@ -330,6 +353,7 @@ def main() -> int:
         if path.parent.resolve() != JOBS_DIR:
             continue
         try:
+            print(f"[REMOÇÃO] Excluindo {path.relative_to(ROOT)}.", flush=True)
             path.unlink()
             deleted += 1
         except OSError as error:

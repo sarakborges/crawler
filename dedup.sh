@@ -217,7 +217,8 @@ def merge_records(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[st
 
     sources: list[dict[str, Any]] = []
     for record in (existing, incoming):
-        old_sources = (record.get("additional_info") or {}).get("sources", [])
+        record_info = record.get("additional_info") or {}
+        old_sources = record_info.get("sources", []) if isinstance(record_info, dict) else []
         candidates = (old_sources if isinstance(old_sources, list) else []) + [source_entry(record)]
         for item in candidates:
             if isinstance(item, dict) and item not in sources:

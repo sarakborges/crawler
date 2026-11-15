@@ -7,14 +7,24 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$ROOT_DIR/jobs"
 
-if command -v python3 >/dev/null 2>&1; then
-  PYTHON=(python3)
-elif command -v python >/dev/null 2>&1; then
-  PYTHON=(python)
-elif command -v py >/dev/null 2>&1; then
+PYTHON=()
+
+python_works() {
+  "$@" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1
+}
+
+# On Windows, "python3" may resolve to the Microsoft Store execution alias
+# even when a working installation is available through "py" or "python".
+if command -v py >/dev/null 2>&1 && python_works py -3; then
   PYTHON=(py -3)
+elif command -v python >/dev/null 2>&1 && python_works python; then
+  PYTHON=(python)
+elif command -v python3 >/dev/null 2>&1 && python_works python3; then
+  PYTHON=(python3)
 else
-  echo "ERRO: Python 3 não encontrado. Instale Python 3.10+ e adicione-o ao PATH." >&2
+  echo "ERRO: não encontrei um interpretador Python 3.10+ funcional." >&2
+  echo "Verifique no Git Bash: py -3 --version; python --version; python3 --version" >&2
+  echo "O alias python3 da Microsoft Store pode aparecer como instalado sem ter o Python instalado." >&2
   exit 127
 fi
 

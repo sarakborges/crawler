@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd -- "$(dirname -- "\${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-if command -v python3 >/dev/null 2>&1; then
-  PYTHON=(python3)
-elif command -v python >/dev/null 2>&1; then
-  PYTHON=(python)
-elif command -v py >/dev/null 2>&1; then
+PYTHON=()
+
+python_works() {
+  "$@" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1
+}
+
+# Evita interpretar o alias da Microsoft Store como uma instalação funcional.
+if command -v py >/dev/null 2>&1 && python_works py -3; then
   PYTHON=(py -3)
+elif command -v python >/dev/null 2>&1 && python_works python; then
+  PYTHON=(python)
+elif command -v python3 >/dev/null 2>&1 && python_works python3; then
+  PYTHON=(python3)
 else
-  echo "ERRO: Python 3 não encontrado. Instale Python 3.10+ e adicione-o ao PATH." >&2
+  echo "ERRO: não encontrei um interpretador Python 3.10+ funcional." >&2
+  echo "Verifique no Git Bash: py -3 --version; python --version; python3 --version" >&2
   exit 127
 fi
-
-exec "\${PYTHON[@]}" - "$ROOT_DIR" <<'PY'
+exec "${PYTHON[@]}" - "$ROOT_DIR" <<'PY'
 from __future__ import annotations
 
 import json
@@ -129,6 +136,7 @@ def load_jobs() -> list[dict[str, Any]]:
 
     jobs: list[dict[str, Any]] = []
     seen_ids: set[int] = set()
+    print(f"[LEITURA] {len(payload)} vagas encontradas em jobs.json.", flush=True)
 
     for index, job in enumerate(payload):
         if not isinstance(job, dict):
@@ -176,7 +184,8 @@ def choose_representative(titles: list[str]) -> str:
 def build_catalog(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: list[dict[str, Any]] = []
 
-    for job in jobs:
+    for position, job in enumerate(jobs, start=1):
+        print(f"[AGRUPAMENTO {position}/{len(jobs)}] {job['title']} (ID {job['id']}).", flush=True)
         best_group: int | None = None
         best_score = 0.0
 
@@ -191,6 +200,7 @@ def build_catalog(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 best_score = score
 
         if best_group is None:
+            print("  [NOVO GRUPO] Criando grupo para este título.", flush=True)
             groups.append({
                 "id": len(groups) + 1,
                 "titles": [job["title"]],
@@ -199,6 +209,7 @@ def build_catalog(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             })
         else:
             group = groups[best_group]
+            print(f"  [GRUPO EXISTENTE] Associando ao grupo {group['id']}.", flush=True)
             group["titles"].append(job["title"])
             group["normalized_titles"].append(job["normalized_title"])
             group["jobs"].append(job["id"])
@@ -239,8 +250,12 @@ def save_catalog(catalog: list[dict[str, Any]]) -> None:
 
 
 def main() -> int:
+    print("[INÍCIO] Construção do catálogo iniciada.", flush=True)
+    print("[ETAPA 1/3] Lendo e validando jobs.json.", flush=True)
     jobs = load_jobs()
+    print("[ETAPA 2/3] Agrupando títulos semelhantes.", flush=True)
     catalog = build_catalog(jobs)
+    print("[ETAPA 3/3] Gravando e validando catalog.json.", flush=True)
     save_catalog(catalog)
 
     print(f"Vagas analisadas: {len(jobs)}")

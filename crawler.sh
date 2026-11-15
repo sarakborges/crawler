@@ -122,15 +122,17 @@ def parse_date(value: Any, reference: datetime = NOW) -> tuple[datetime | None, 
     if low in {"ontem", "yesterday"}:
         return (reference - timedelta(days=1)).replace(hour=12, minute=0, second=0), "date"
     relative = re.search(r"(?:há|ha|há cerca de)\s+(\d+)\s+(minuto|minutos|hora|horas|dia|dias|semana|semanas|m[eê]s|meses)", low)
-    if relative:
-        amount, unit = int(relative.group(1)), relative.group(2)
-        if unit.startswith("minuto"):
+    ago = re.search(r"(\d+)\s+(minute|minutes|hour|hours|day|days|week|weeks)\s+ago", low)
+    if relative or ago:
+        match = relative or ago
+        amount, unit = int(match.group(1)), match.group(2)
+        if unit.startswith(("minuto", "minute")):
             return reference - timedelta(minutes=amount), "datetime"
-        if unit.startswith("hora"):
+        if unit.startswith(("hora", "hour")):
             return reference - timedelta(hours=amount), "datetime"
-        if unit.startswith("dia"):
+        if unit.startswith(("dia", "day")):
             return (reference - timedelta(days=amount)).replace(hour=12, minute=0, second=0), "date"
-        if unit.startswith("semana"):
+        if unit.startswith(("semana", "week")):
             return (reference - timedelta(weeks=amount)).replace(hour=12, minute=0, second=0), "date"
         return (reference - timedelta(days=30 * amount)).replace(hour=12, minute=0, second=0), "date"
     try:
@@ -490,12 +492,15 @@ def card_candidates(page: Page, platform: str) -> tuple[list[dict[str, Any]], in
             rejected_cards += 1
             continue
 
-        title = (
-            text_by_selector(card, tag="h3", class_name="job-title")
-            or text_by_selector(card, tag="h2", class_name="cargo")
-            or clean(anchor.attrs.get("title"))
-            or clean(anchor.text())
-        )
+        if platform == "gupy":
+            title = text_by_selector(card, tag="h3", class_name="MuiTypography-heading-small")
+        elif platform == "trabalhabrasil":
+            title = text_by_selector(card, tag="h2", class_name="job-title")
+        elif platform == "vagas.com":
+            title = text_by_selector(card, tag="h2", class_name="cargo")
+        else:
+            title = clean(anchor.attrs.get("title")) or clean(anchor.text())
+        title = title or clean(anchor.attrs.get("title")) or clean(anchor.text())
         if platform == "indeed":
             title = (
                 text_by_selector(card, tag="span", attr_name="id", attr_value=f"jobTitle-{dict(urllib.parse.parse_qsl(parsed.query)).get('jk', '')}")
@@ -529,7 +534,7 @@ def card_candidates(page: Page, platform: str) -> tuple[list[dict[str, Any]], in
             location = next((item for item in info_items if re.search(r"porto\s+alegre|remoto|h[ií]brido", item, re.I)), None)
         elif platform == "trabalhabrasil":
             company = text_by_selector(card, tag="p", class_name="job-company")
-            location = text_by_selector(card, tag="address", class_name="job-location")
+            location = text_by_selector(card, class_name="job-location")
             external_id = clean(card.attrs.get("data-job-id"))
         elif platform == "vagas.com":
             company = text_by_selector(card, tag="span", class_name="emprVaga")
@@ -642,9 +647,11 @@ def has_explicit_no_results(page: Page) -> bool:
 
 
 def next_pages(page: Page, platform: str) -> list[str]:
-    container = listing_container(page, platform)
+    # Paginação pode ficar imediatamente fora do contêiner de cards; só aceita
+    # links explicitamente marcados como paginação/avanço, nunca links genéricos.
+    listing_container(page, platform)
     urls: list[str] = []
-    for node in find_nodes(container, tag="a"):
+    for node in find_nodes(page.document.root, tag="a"):
         href = node.attrs.get("href", "").strip()
         if not href:
             continue

@@ -581,11 +581,16 @@ def location_allowed(record: dict[str, Any], context: str = "") -> tuple[bool, s
     return porto_alegre, model
 
 
+UNDATED_SKIPPED = 0
+
+
 def in_window(record: dict[str, Any], start: datetime, end: datetime) -> bool:
+    global UNDATED_SKIPPED
     published, precision = parse_date(record.get("published_at"))
     if published is None:
         record.setdefault("additional_info", {})["publication_date_missing"] = True
-        return True
+        UNDATED_SKIPPED += 1
+        return False
     if precision == "date":
         return start.date() <= published.date() <= end.date()
     return start <= published <= end
@@ -814,6 +819,7 @@ def main() -> int:
     log("\nResumo")
     log(f"  Páginas: {sum(item['pages'] for item in summary.values())}")
     log(f"  Novos arquivos: {sum(item['saved'] for item in summary.values())}")
+    log(f"  Ignoradas sem data de publicação verificável: {UNDATED_SKIPPED}")
     for name, result in summary.items():
         log(f"  {name}: {result['status']}")
     if incomplete:

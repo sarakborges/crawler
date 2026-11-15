@@ -277,7 +277,9 @@ class Fetcher:
                 self.delays[base] = HOST_DELAY_SECONDS
                 return parser
             self.robots_cache[base] = None
-            return None
+            raise RobotsUnavailable(
+                f"robots.txt retornou HTTP {error.code} ({error.reason})"
+            ) from error
         except Exception:
             self.robots_cache[base] = None
             return None
@@ -868,11 +870,25 @@ def crawl(source: Source, fetcher: Fetcher, start: datetime, end: datetime, next
         except RobotsUnavailable as error:
             failed = True
             result["errors"].append(f"robots.txt indisponível em {url}: {error}")
-            log(f"  [ERRO] Não foi possível verificar robots.txt em {url}: {error}")
+            if "HTTP 403" in str(error):
+                log(f"  [ACESSO NEGADO 403] Não foi possível consultar robots.txt em {url}.")
+                log("  [SEM RETENTATIVA] Encerrando as demais URLs desta plataforma nesta execução.")
+                queue.clear()
+            else:
+                log(f"  [ERRO] Não foi possível verificar robots.txt em {url}: {error}")
         except ListingStructureError as error:
             failed = True
             result["errors"].append(f"Estrutura de resultados não reconhecida em {url}: {error}")
             log(f"  [ERRO DE ESTRUTURA] {error}")
+        except urllib.error.HTTPError as error:
+            failed = True
+            result["errors"].append(f"HTTP {error.code} em {url}: {error.reason}")
+            if error.code == 403:
+                log(f"  [ACESSO NEGADO 403] O servidor recusou a consulta: {url}")
+                log("  [SEM RETENTATIVA] Não serão tentadas outras páginas desta plataforma nesta execução.")
+                queue.clear()
+            else:
+                log(f"  [ERRO HTTP {error.code}] {url}: {error.reason}")
         except Exception as error:
             failed = True
             result["errors"].append(f"Página {url}: {error}")

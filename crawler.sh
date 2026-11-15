@@ -676,6 +676,7 @@ def fallback_record(candidate: dict[str, Any], platform: str, detail: Page | Non
 def save_record(next_id: int, record: dict[str, Any]) -> int:
     record["id"] = next_id
     path = JOBS_DIR / f"{next_id}.json"
+    log(f"[GRAVAÇÃO] Salvando {path.relative_to(ROOT)}: {record.get('title') or '(sem título)'}")
     payload = json.dumps(record, ensure_ascii=False, indent=2) + "\n"
     fd, temp_path = tempfile.mkstemp(prefix=f".{next_id}.", suffix=".tmp", dir=JOBS_DIR)
     try:
@@ -689,6 +690,7 @@ def save_record(next_id: int, record: dict[str, Any]) -> int:
             os.unlink(temp_path)
         except FileNotFoundError:
             pass
+    log(f"[OK] {path.relative_to(ROOT)} gravado.")
     return next_id + 1
 
 
@@ -751,12 +753,17 @@ def crawl(source: Source, fetcher: Fetcher, start: datetime, end: datetime, next
             log(f"  Página {result['pages'] + 1}: {url}")
             page = fetcher.get(url)
             result["pages"] += 1
+            log("  [EXTRAÇÃO] Analisando JSON-LD e links da página.")
             structured = jsonld_jobs(page.document)
             candidates = candidates_from(page)
+            log(f"  [EXTRAÇÃO] {len(structured)} vagas estruturadas e {len(candidates)} links candidatos.")
+            if has_explicit_no_results(page):
+                log("  [RESULTADO] A página informa que não há vagas para esta consulta.")
             if structured or candidates or has_explicit_no_results(page):
                 saw_listings = True
             known_urls = set()
-            for job in structured:
+            for job_index, job in enumerate(structured, start=1):
+                log(f"  [VAGA {job_index}/{len(structured)}] Extraindo {job.get('title') or '(sem título)'}")
                 record = to_record(job, source.name, page.url)
                 if record.get("url"):
                     known_urls.add(urllib.parse.urldefrag(record["url"])[0])
@@ -766,10 +773,16 @@ def crawl(source: Source, fetcher: Fetcher, start: datetime, end: datetime, next
                     record.setdefault("additional_info", {})["work_model"] = model or record["additional_info"].get("work_model")
                     next_id = save_record(next_id, record)
                     result["saved"] += 1
-            for candidate in candidates:
+                elif not allowed:
+                    log(f"  [FILTRO] Vaga ignorada por localidade/modalidade: {record.get('title') or '(sem título)'}")
+                else:
+                    log(f"  [FILTRO] Vaga fora do intervalo de publicação: {record.get('title') or '(sem título)'}")
+            for candidate_index, candidate in enumerate(candidates, start=1):
                 if urllib.parse.urldefrag(candidate["url"])[0] in known_urls or candidate["url"] in visited:
+                    log(f"  [DETALHE] Link já coberto ou visitado; ignorando {candidate['url']}")
                     continue
                 try:
+                    log(f"  [DETALHE {candidate_index}/{len(candidates)}] Consultando {candidate['url']}")
                     detail = fetcher.get(candidate["url"])
                     visited.add(candidate["url"])
                     jobs = jsonld_jobs(detail.document)
@@ -809,9 +822,13 @@ def crawl(source: Source, fetcher: Fetcher, start: datetime, end: datetime, next
                 except Exception as error:
                     failed = True
                     result["errors"].append(f"Detalhe {candidate['url']}: {error}")
-            for next_url in next_pages(page):
+            discovered_pages = next_pages(page)
+            queued_pages = 0
+            for next_url in discovered_pages:
                 if next_url not in visited:
                     queue.append(next_url)
+                    queued_pages += 1
+            log(f"  [PAGINAÇÃO] {queued_pages} próxima(s) página(s) adicionada(s) à fila.")
         except RobotsDisallowed as error:
             result["status"] = "SKIPPED_ROBOTS"
             result["notes"].append(f"Pesquisa não permitida: {url} ({error})")
@@ -859,6 +876,7 @@ def main() -> int:
         for name, note in RESTRICTED_SOURCES.items()
     }
     next_id = next_id_from_disk()
+    log(f"[INICIALIZAÇÃO] Próximo ID interno: {next_id}")
     fetcher = Fetcher()
     for source in SOURCES:
         log(f"\n[{source.name}]")

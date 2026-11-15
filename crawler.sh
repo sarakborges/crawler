@@ -530,8 +530,15 @@ def card_candidates(page: Page, platform: str) -> tuple[list[dict[str, Any]], in
         elif platform == "bne":
             external_id = re.search(r"/(\d+)/?$", parsed.path)
             external_id = external_id.group(1) if external_id else None
-            info_items = [node.text() for node in find_nodes(card, class_name="info__vaga-item")]
-            location = next((item for item in info_items if re.search(r"porto\s+alegre|remoto|h[ií]brido", item, re.I)), None)
+            info_items = [clean(node.text()) for node in find_nodes(card, class_name="info__vaga-item")]
+            # BNE cards: occupation, company, work model, location, then description.
+            company = info_items[1] if len(info_items) > 1 else None
+            location = next(
+                (item for item in info_items if item and re.search(r"porto\s+alegre|remoto|h[ií]brido", item, re.I)),
+                None,
+            )
+            if not location and "porto-alegre-rs" in parsed.path.casefold():
+                location = "Porto Alegre / RS"
         elif platform == "trabalhabrasil":
             company = text_by_selector(card, tag="p", class_name="job-company")
             location = text_by_selector(card, class_name="job-location")
@@ -590,7 +597,7 @@ def card_candidates(page: Page, platform: str) -> tuple[list[dict[str, Any]], in
     return list(unique.values()), rejected_cards
 
 
-def make_listing_record(candidate: dict[str, Any], platform: str) -> dict[str, Any]:
+def make_listing_record(candidate: dict[str, Any], platform: str, start: datetime, end: datetime) -> dict[str, Any]:
     published, precision = parse_date(candidate.get("published_at"))
     model = candidate.get("work_model")
     location_text = str(candidate.get("location") or "")
@@ -630,6 +637,11 @@ def make_listing_record(candidate: dict[str, Any], platform: str) -> dict[str, A
             "work_model": model,
             "date_precision": precision,
             "listing_location": clean(location_text),
+            "publication_date_pending": published is None,
+            "collection_window": {
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+            } if published is None else None,
             "enrichment_status": "pending",
         },
     }
@@ -719,16 +731,18 @@ def location_allowed(record: dict[str, Any], context: str = "") -> tuple[bool, s
     return porto_alegre, model
 
 
-UNDATED_SKIPPED = 0
+UNDATED_PENDING = 0
 
 
 def in_window(record: dict[str, Any], start: datetime, end: datetime) -> bool:
-    global UNDATED_SKIPPED
+    global UNDATED_PENDING
     published, precision = parse_date(record.get("published_at"))
     if published is None:
-        record.setdefault("additional_info", {})["publication_date_missing"] = True
-        UNDATED_SKIPPED += 1
-        return False
+        # Some listing cards do not expose a publication date. Keep the strictly
+        # identified card so enrich.sh can verify the date from its detail page.
+        record.setdefault("additional_info", {})["publication_date_pending"] = True
+        UNDATED_PENDING += 1
+        return True
     if precision == "date":
         return start.date() <= published.date() <= end.date()
     return start <= published <= end
@@ -826,7 +840,7 @@ def crawl(source: Source, fetcher: Fetcher, start: datetime, end: datetime, next
 
             for index, candidate in enumerate(candidates, start=1):
                 log(f"  [VAGA {index}/{len(candidates)}] {candidate['title']}")
-                record = make_listing_record(candidate, source.name)
+                record = make_listing_record(candidate, source.name, start, end)
                 context = candidate.get("card_text", "")
                 allowed, model = location_allowed(record, context)
                 if not allowed:
@@ -915,7 +929,7 @@ def main() -> int:
     log("\nResumo")
     log(f"  Páginas: {sum(item['pages'] for item in summary.values())}")
     log(f"  Novos arquivos: {sum(item['saved'] for item in summary.values())}")
-    log(f"  Ignoradas sem data de publicação verificável: {UNDATED_SKIPPED}")
+    log(f"  Aguardando confirmação da data no enrich.sh: {UNDATED_PENDING}")
     for name, result in summary.items():
         log(f"  {name}: {result['status']}")
     if incomplete:
